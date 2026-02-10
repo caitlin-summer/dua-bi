@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Đua Bi Thần Tốc - Celebration First</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@900&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Nunito', sans-serif; overflow: hidden; background-color: #fff5f7; }
+        .custom-scrollbar::-webkit-scrollbar { width: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #fda4af; border-radius: 10px; }
+        canvas { 
+            filter: drop-shadow(0 10px 40px rgba(244, 63, 94, 0.2)); 
+            background: white; 
+            border: 4px solid white; 
+            border-radius: 2rem; 
+            height: 100vh;
+            width: auto;
+            max-width: 100%;
+            display: block;
+        }
+        .sidebar-compact { width: 220px; flex-shrink: 0; border-right: 1px solid rgba(244, 63, 94, 0.1); background: white; }
+        .finish-announcement {
+            animation: slideDown 0.5s ease-out forwards, fadeOut 0.5s ease-in 2s forwards;
+        }
+        @keyframes slideDown { from { transform: translate(-50%, -100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+        @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+        
+        .slow-mo-overlay {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(244, 63, 94, 0.8);
+            color: white;
+            padding: 4px 16px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            pointer-events: none;
+            z-index: 40;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse { 0%, 100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.05); } }
+    </style>
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@19.0.0",
+        "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
+        "matter-js": "https://esm.sh/matter-js@0.19.0",
+        "lucide-react": "https://esm.sh/lucide-react@0.473.0?external=react"
+      }
+    }
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="module">
+        import React, { useState, useCallback, useEffect, useRef, createElement as h } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import Matter from 'matter-js';
+        import { Plus, Trash2, Medal, Users, RotateCcw, Play, Trophy, Volume2, VolumeX } from 'lucide-react';
+
+        const CANDY_COLORS = ['#ff4d6d', '#ff7b00', '#ffc300', '#06d6a0', '#118ab2', '#7209b7', '#f72585', '#4cc9f0'];
+        
+        const SOUND_URLS = {
+            CLICK: 'https://assets.mixkit.co/active_storage/sfx/2578/2578-preview.mp3',
+            FINISH: 'https://assets.mixkit.co/active_storage/sfx/2000/2000-preview.mp3',
+            BGM: 'https://cdn.pixabay.com/audio/2022/03/23/audio_07b3992337.mp3'
+        };
+
+        const PHYSICS_CONFIG = {
+            WIDTH: 600,
+            HEIGHT: 800,
+            MARBLE_SIZE: 15,
+            GRAVITY: 2.8, 
+            FINISH_LINE_Y: 760,
+            SUB_STEPS: 3,
+            TRAIL_LENGTH: 15,
+            SLOW_MO_FACTOR: 0.4
+        };
+
+        const App = () => {
+            const [players, setPlayers] = useState([]);
+            const [status, setStatus] = useState('IDLE'); // IDLE, RACING, CELEBRATING, FINISHED
+            const [elapsedTime, setElapsedTime] = useState(0);
+            const [newName, setNewName] = useState('');
+            const [lastFinisher, setLastFinisher] = useState(null);
+            const [isMuted, setIsMuted] = useState(false);
+            
+            const engine = useRef(Matter.Engine.create());
+            const canvasRef = useRef(null);
+            const bodiesMap = useRef(new Map());
+            const trailsMap = useRef(new Map()); 
+            const particles = useRef([]);
+            const timerInterval = useRef(null);
+            const playersRef = useRef([]);
+
+            const bgmRef = useRef(null);
+            const clickSoundPool = useRef([]);
+            const finishSoundRef = useRef(null);
+
+            useEffect(() => { playersRef.current = players; }, [players]);
+
+            useEffect(() => {
+                bgmRef.current = new Audio(SOUND_URLS.BGM);
+                bgmRef.current.loop = true;
+                bgmRef.current.volume = 0.2;
+                finishSoundRef.current = new Audio(SOUND_URLS.FINISH);
+                finishSoundRef.current.volume = 0.4;
+                clickSoundPool.current = Array.from({ length: 12 }).map(() => {
+                    const a = new Audio(SOUND_URLS.CLICK);
+                    a.volume = 0.1;
+                    return a;
+                });
+            }, []);
+
+            const playClick = () => {
+                if (isMuted) return;
+                const sound = clickSoundPool.current.find(s => s.paused) || clickSoundPool.current[0];
+                sound.currentTime = 0;
+                sound.playbackRate = 0.8 + Math.random() * 0.5;
+                sound.play().catch(() => {});
+            };
+
+            const playFinish = () => {
+                if (isMuted) return;
+                finishSoundRef.current.currentTime = 0;
+                finishSoundRef.current.play().catch(() => {});
+            };
+
+            const spawnParticles = (x, y, color, count = 15, speed = 5, isConfetti = false) => {
+                for (let i = 0; i < count; i++) {
+                    particles.current.push({
+                        x, y,
+                        vx: (Math.random() - 0.5) * speed,
+                        vy: isConfetti ? (Math.random() * -speed - 4) : (Math.random() - 0.5) * speed,
+                        size: isConfetti ? (Math.random() * 10 + 5) : (Math.random() * 4 + 2),
+                        color,
+                        life: 1.0,
+                        decay: isConfetti ? 0.008 : (Math.random() * 0.02 + 0.03),
+                        isSquare: isConfetti && Math.random() > 0.5
+                    });
+                }
+            };
+
+            const generateRandomMap = useCallback((world) => {
+                const funnelAngle = 0.7;
+                Matter.Composite.add(world, [
+                    Matter.Bodies.rectangle(100, 80, 350, 25, { isStatic: true, angle: funnelAngle, render: { fillStyle: '#fb7185' } }),
+                    Matter.Bodies.rectangle(500, 80, 350, 25, { isStatic: true, angle: -funnelAngle, render: { fillStyle: '#fb7185' } })
+                ]);
+
+                for (let i = 0; i < 4; i++) {
+                    const px = 150 + Math.random() * 300;
+                    const py = 180 + i * 150;
+                    const spinner = Matter.Bodies.rectangle(px, py, 110, 10, {
+                        label: 'spinner', render: { fillStyle: '#fb923c' }, restitution: 1.2
+                    });
+                    const constraint = Matter.Constraint.create({ pointA: { x: px, y: py }, bodyB: spinner, stiffness: 1, length: 0 });
+                    Matter.Composite.add(world, [spinner, constraint]);
+                }
+
+                const railRows = [320, 500, 680];
+                railRows.forEach((y, idx) => {
+                    const isLeft = (idx % 2 === 0);
+                    const rAngle = isLeft ? (0.35 + Math.random() * 0.15) : (-0.35 - Math.random() * 0.15);
+                    const x = isLeft ? 150 : 450;
+                    Matter.Composite.add(world, Matter.Bodies.rectangle(x, y, 420, 15, { 
+                        isStatic: true, angle: rAngle, restitution: 1.1, render: { fillStyle: '#fda4af' } 
+                    }));
+                });
+
+                for (let i = 0; i < 7; i++) {
+                    const bx = 100 + Math.random() * 400;
+                    const by = 150 + Math.random() * 500;
+                    const isNearRail = railRows.some(ry => Math.abs(by - ry) < 40);
+                    if (!isNearRail && by < 720) {
+                        Matter.Composite.add(world, Matter.Bodies.circle(bx, by, 12, {
+                            isStatic: true, label: 'bumper', restitution: 3.8, render: { fillStyle: '#f43f5e' }
+                        }));
+                    }
+                }
+            }, []);
+
+            const setupWorld = useCallback(() => {
+                const { world } = engine.current;
+                Matter.World.clear(world);
+                engine.current.gravity.y = PHYSICS_CONFIG.GRAVITY;
+
+                const ground = Matter.Bodies.rectangle(300, 950, 1200, 200, { isStatic: true, label: 'ground' });
+                const leftWall = Matter.Bodies.rectangle(-25, 400, 50, 1600, { isStatic: true, restitution: 0.95 });
+                const rightWall = Matter.Bodies.rectangle(625, 400, 50, 1600, { isStatic: true, restitution: 0.95 });
+                Matter.Composite.add(world, [ground, leftWall, rightWall]);
+
+                generateRandomMap(world);
+
+                Matter.Events.off(engine.current, 'collisionStart');
+                Matter.Events.on(engine.current, 'collisionStart', (event) => {
+                    event.pairs.forEach(pair => {
+                        const { bodyA, bodyB } = pair;
+                        if (bodyA.label === 'marble' || bodyB.label === 'marble') {
+                            playClick();
+                            const marble = bodyA.label === 'marble' ? bodyA : bodyB;
+                            const other = bodyA.label === 'marble' ? bodyB : bodyA;
+                            if (other.label === 'bumper') {
+                                const pId = bodiesMap.current.get(marble.id);
+                                const p = playersRef.current.find(x => x.id === pId);
+                                if (p) {
+                                    spawnParticles(marble.position.x, marble.position.y, p.color, 12, 6);
+                                    Matter.Body.applyForce(marble, marble.position, { x: (Math.random() - 0.5) * 0.008, y: -0.008 });
+                                }
+                            }
+                        }
+                    });
+                });
+            }, [generateRandomMap]);
+
+            useEffect(() => {
+                setupWorld();
+                let animationId;
+                const render = () => {
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
+                    const ctx = canvas.getContext('2d');
+                    
+                    const isAnyWinner = playersRef.current.some(p => p.rank);
+                    // Slow mo kích hoạt khi có người về đích, kể cả lúc đang CELEBRATING
+                    const timeScale = isAnyWinner ? PHYSICS_CONFIG.SLOW_MO_FACTOR : 1.0;
+                    
+                    const subStepDelta = ((1000 / 60) / PHYSICS_CONFIG.SUB_STEPS) * timeScale;
+                    for (let i = 0; i < PHYSICS_CONFIG.SUB_STEPS; i++) Matter.Engine.update(engine.current, subStepDelta);
+
+                    const bodies = Matter.Composite.allBodies(engine.current.world);
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                    const fy = PHYSICS_CONFIG.FINISH_LINE_Y;
+                    const s = 20;
+                    for(let i=0; i<600/s; i++) for(let j=0; j<2; j++) { ctx.fillStyle = (i+j)%2 === 0 ? '#334155' : '#fff'; ctx.fillRect(i*s, fy + j*s, s, s); }
+
+                    bodies.forEach(body => {
+                        if (body.label === 'marble') {
+                            let trail = trailsMap.current.get(body.id) || [];
+                            trail.push({ x: body.position.x, y: body.position.y });
+                            if (trail.length > PHYSICS_CONFIG.TRAIL_LENGTH) trail.shift();
+                            trailsMap.current.set(body.id, trail);
+                            const pId = bodiesMap.current.get(body.id);
+                            const p = playersRef.current.find(x => x.id === pId);
+                            if (p && trail.length > 1) {
+                                ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+                                for (let i = 0; i < trail.length - 1; i++) {
+                                    const ratio = i / trail.length;
+                                    ctx.beginPath(); ctx.moveTo(trail[i].x, trail[i].y); ctx.lineTo(trail[i + 1].x, trail[i + 1].y);
+                                    ctx.lineWidth = (body.circleRadius * 1.8) * ratio; ctx.strokeStyle = p.color; ctx.globalAlpha = ratio * 0.35; ctx.stroke();
+                                }
+                            }
+                            ctx.globalAlpha = 1.0;
+                        }
+                    });
+
+                    particles.current = particles.current.filter(p => p.life > 0);
+                    particles.current.forEach(p => {
+                        p.x += p.vx * timeScale; p.y += p.vy * timeScale; p.life -= p.decay * timeScale;
+                        ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+                        ctx.beginPath();
+                        if(p.isSquare) ctx.fillRect(p.x, p.y, p.size, p.size);
+                        else ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                    ctx.globalAlpha = 1.0;
+
+                    const marbles = bodies.filter(b => b.label === 'marble');
+                    if (status === 'RACING' && marbles.length > 0) {
+                        const lowestY = Math.max(...marbles.map(m => m.position.y));
+                        const progress = Math.min(1, Math.max(0, (lowestY - 100) / (fy - 100)));
+                        if (bgmRef.current) bgmRef.current.playbackRate = (isAnyWinner ? 0.8 : 1.0) + (progress * 0.4);
+                    }
+
+                    bodies.forEach(body => {
+                        if (body.label === 'marble') {
+                            const pId = bodiesMap.current.get(body.id);
+                            const p = playersRef.current.find(x => x.id === pId);
+                            if (!p) return;
+                            ctx.save();
+                            ctx.shadowBlur = 10; ctx.shadowColor = p.color;
+                            ctx.beginPath(); ctx.arc(body.position.x, body.position.y, body.circleRadius, 0, Math.PI * 2);
+                            ctx.fillStyle = p.color; ctx.fill();
+                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.stroke();
+                            ctx.fillStyle = '#fff'; ctx.font = '900 10px Nunito'; ctx.textAlign = 'center';
+                            ctx.fillText(p.name.substring(0, 5).toUpperCase(), body.position.x, body.position.y + 4);
+                            ctx.restore();
+
+                            if (body.position.y > fy && !p.rank) {
+                                playFinish();
+                                spawnParticles(body.position.x, fy + 10, p.color, 25, 8);
+                                setPlayers(prev => {
+                                    const next = [...prev];
+                                    const idx = next.findIndex(x => x.id === p.id);
+                                    if (idx !== -1 && !next[idx].rank) {
+                                        const rank = next.filter(x => x.rank).length + 1;
+                                        next[idx] = { ...next[idx], rank };
+                                        setLastFinisher(next[idx]);
+                                    }
+                                    return next;
+                                });
+                            }
+                        } else if (body.isStatic && body.position.y < 850) {
+                            ctx.beginPath();
+                            if (body.circleRadius) ctx.arc(body.position.x, body.position.y, body.circleRadius, 0, Math.PI * 2);
+                            else { ctx.moveTo(body.vertices[0].x, body.vertices[0].y); body.vertices.forEach(v => ctx.lineTo(v.x, v.y)); ctx.closePath(); }
+                            ctx.fillStyle = body.render.fillStyle || '#ffe4e6'; ctx.fill();
+                        } else if (body.label === 'spinner') {
+                            ctx.beginPath();
+                            ctx.moveTo(body.vertices[0].x, body.vertices[0].y);
+                            body.vertices.forEach(v => ctx.lineTo(v.x, v.y));
+                            ctx.closePath();
+                            ctx.fillStyle = body.render.fillStyle; ctx.fill();
+                        }
+                    });
+                    animationId = requestAnimationFrame(render);
+                };
+                render();
+                return () => cancelAnimationFrame(animationId);
+            }, [setupWorld, status]);
+
+            useEffect(() => {
+                if (status === 'RACING') {
+                    const interval = setInterval(() => {
+                        const currentWinners = playersRef.current.filter(p => p.rank).length;
+                        const total = playersRef.current.length;
+                        
+                        // ĐẠT ĐIỀU KIỆN KẾT THÚC
+                        if (currentWinners >= Math.min(total, 3) && currentWinners > 0) {
+                            setStatus('CELEBRATING'); // Trạng thái ăn mừng trung gian
+                            
+                            // 🎇 HIỆU ỨNG TUNG HOA NỔ
+                            for(let i=0; i<25; i++) {
+                                setTimeout(() => {
+                                    spawnParticles(Math.random()*600, 800, CANDY_COLORS[Math.floor(Math.random()*CANDY_COLORS.length)], 20, 15, true);
+                                }, i * 80);
+                            }
+                            
+                            if (bgmRef.current) bgmRef.current.pause();
+                            clearInterval(timerInterval.current);
+
+                            // ⏰ SAU KHI TUNG HOA XONG (2.5 giây) MỚI HIỆN THÔNG BÁO
+                            setTimeout(() => {
+                                setStatus('FINISHED');
+                            }, 2500);
+
+                            return;
+                        }
+                        
+                        Matter.Composite.allBodies(engine.current.world).filter(b => b.label === 'marble').forEach(m => {
+                            if (m.speed < 0.4 && m.position.y < PHYSICS_CONFIG.FINISH_LINE_Y) {
+                                Matter.Body.applyForce(m, m.position, { x: (Math.random() - 0.5) * 0.25, y: 0.1 });
+                            }
+                        });
+                    }, 400);
+                    return () => clearInterval(interval);
+                }
+            }, [status]);
+
+            const startRace = () => {
+                if (players.length < 1) return;
+                setupWorld(); 
+                setStatus('RACING');
+                bodiesMap.current.clear();
+                trailsMap.current.clear();
+                particles.current = [];
+                setLastFinisher(null);
+                setPlayers(p => p.map(x => ({ ...x, rank: null })));
+                if (bgmRef.current) { bgmRef.current.currentTime = 0; bgmRef.current.playbackRate = 1.0; bgmRef.current.play().catch(() => {}); }
+                
+                players.forEach((p, i) => {
+                    setTimeout(() => {
+                        const marble = Matter.Bodies.circle(300 + (Math.random()*40-20), -30, PHYSICS_CONFIG.MARBLE_SIZE, { 
+                            restitution: 0.6, friction: 0.001, frictionAir: 0.005, label: 'marble' 
+                        });
+                        bodiesMap.current.set(marble.id, p.id);
+                        Matter.World.add(engine.current.world, marble);
+                    }, i * 100);
+                });
+            };
+
+            const resetAndEliminate = () => {
+                const winner = players.find(p => p.rank === 1);
+                if (winner) setPlayers(prev => prev.filter(p => p.id !== winner.id));
+                setStatus('IDLE');
+                setLastFinisher(null);
+                if (bgmRef.current) bgmRef.current.pause();
+                setupWorld(); 
+                particles.current = [];
+                trailsMap.current.clear();
+                if (timerInterval.current) clearInterval(timerInterval.current);
+                setElapsedTime(0);
+            };
+
+            const addPlayers = () => {
+                if (newName.trim()) {
+                    const names = newName.split(/\r?\n|,/).map(n => n.trim()).filter(n => n !== "");
+                    const newEntries = names.map((name, idx) => ({ id: crypto.randomUUID(), name, color: CANDY_COLORS[(players.length + idx) % CANDY_COLORS.length] }));
+                    setPlayers([...players, ...newEntries]);
+                    setNewName('');
+                }
+            };
+
+            const winnersList = [...players].filter(p => p.rank).sort((a, b) => a.rank - b.rank);
+            const isSlowMo = (status === 'RACING' || status === 'CELEBRATING') && players.some(p => p.rank);
+
+            return h('div', { className: "flex w-screen h-screen bg-[#fff5f7]" },
+                h('aside', { className: "sidebar-compact shadow-xl flex flex-col z-20 h-full overflow-hidden" },
+                    h('div', { className: "p-4 border-b border-rose-50 flex items-center justify-between" },
+                        h('div', null,
+                            h('h1', { className: "text-rose-500 text-xl font-black italic tracking-tighter" }, "MARBLE RACE"),
+                            h('p', { className: "text-rose-300 text-[9px] font-black uppercase" }, "Sĩ số: " + players.length)
+                        ),
+                        h('button', { onClick: () => setIsMuted(!isMuted), className: "p-2 bg-rose-50 text-rose-400 rounded-full transition-colors" }, isMuted ? h(VolumeX, { size: 18 }) : h(Volume2, { size: 18 }))
+                    ),
+                    h('div', { className: "p-3 border-b border-rose-50 bg-rose-50/20" },
+                        h('div', { className: "flex flex-col gap-2" },
+                            h('textarea', { value: newName, onChange: e => setNewName(e.target.value), placeholder: "Dán tên học sinh...", className: "w-full bg-white text-rose-600 text-[11px] px-2 py-1.5 rounded-lg font-bold outline-none border border-rose-100 focus:border-rose-400 h-28 resize-none custom-scrollbar" }),
+                            h('button', { onClick: addPlayers, className: "bg-rose-500 text-white py-2 rounded-xl text-[10px] font-black uppercase shadow-md active:scale-95" }, "THÊM HỌC SINH")
+                        )
+                    ),
+                    h('div', { className: "flex-1 overflow-y-auto custom-scrollbar p-3 space-y-1" },
+                        players.map((p) => h('div', { key: p.id, className: `p-2 rounded-xl flex items-center justify-between border ${p.rank === 1 ? 'bg-amber-50 border-amber-200' : 'bg-white border-rose-50'}` },
+                            h('div', { className: "flex items-center gap-1.5 min-w-0" },
+                                h('div', { className: "w-3 h-3 rounded-full flex-shrink-0", style: { backgroundColor: p.color } }),
+                                h('span', { className: "text-[10px] font-black text-slate-600 uppercase truncate" }, p.name)
+                            ),
+                            status === 'IDLE' && h('button', { onClick: () => setPlayers(players.filter(x => x.id !== p.id)), className: "text-rose-200 hover:text-rose-500" }, h(Trash2, { size: 10 }))
+                        ))
+                    ),
+                    h('div', { className: "p-4 space-y-2 border-t border-rose-50 bg-rose-50/40" },
+                        status === 'IDLE' ? h('button', { onClick: startRace, disabled: players.length < 1, className: "w-full py-2.5 bg-rose-500 text-white font-black text-xs rounded-xl shadow-lg active:translate-y-0.5" }, "BẮT ĐẦU 🏁") : h('button', { onClick: resetAndEliminate, className: "w-full py-2.5 bg-slate-700 text-white font-black text-xs rounded-xl shadow-lg" }, "LÀM MỚI 🔄"),
+                        status === 'IDLE' && players.length > 0 && h('button', { onClick: () => setPlayers([]), className: "w-full py-1 text-rose-300 font-black text-[9px] uppercase hover:text-rose-500" }, "XÓA HẾT")
+                    )
+                ),
+
+                h('main', { className: "flex-1 flex items-center justify-center p-0 relative h-full bg-slate-50 overflow-hidden" },
+                    h('canvas', { ref: canvasRef, width: 600, height: 800, className: "h-full w-auto" }),
+                    
+                    isSlowMo && h('div', { className: "slow-mo-overlay" }, "Slow Motion 0.4x"),
+
+                    lastFinisher && h('div', { className: "absolute top-10 left-1/2 -translate-x-1/2 finish-announcement z-30 pointer-events-none" },
+                        h('div', { className: "bg-white/90 backdrop-blur px-6 py-3 rounded-full border-2 border-rose-400 shadow-2xl flex items-center gap-3" },
+                            h('span', { className: "text-2xl" }, lastFinisher.rank === 1 ? '🥇' : lastFinisher.rank === 2 ? '🥈' : lastFinisher.rank === 3 ? '🥉' : '🏁'),
+                            h('span', { className: "text-rose-600 font-black uppercase text-sm tracking-widest" }, lastFinisher.name, " HẠNG ", lastFinisher.rank)
+                        )
+                    ),
+                    winnersList.length > 0 && h('div', { className: "absolute top-4 right-4 flex flex-col gap-1 pointer-events-none" },
+                        winnersList.slice(0, 5).map((w, i) => h('div', { key: w.id, className: "bg-white/95 px-3 py-1.5 rounded-full flex items-center gap-2 border border-rose-100 shadow-md animate-in slide-in-from-right-4" },
+                            h('span', { className: "text-base" }, i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '🏁'),
+                            h('span', { className: "text-[10px] font-black text-slate-700 uppercase" }, w.name)
+                        ))
+                    )
+                ),
+
+                status === 'FINISHED' && h('div', { className: "fixed inset-0 z-50 flex items-center justify-center bg-rose-500/20 backdrop-blur-sm p-4" },
+                    h('div', { className: "bg-white p-5 rounded-[2rem] max-w-[260px] w-full text-center shadow-2xl border-4 border-white animate-in zoom-in" },
+                        h(Trophy, { size: 44, className: "mx-auto text-yellow-500 mb-1" }),
+                        h('h2', { className: "text-rose-300 font-black uppercase tracking-widest text-[10px] mb-3" }, "KẾT QUẢ CUỘC ĐUA"),
+                        h('div', { className: "space-y-1.5 mb-5 text-left" },
+                            winnersList.slice(0, 3).map((w, i) => h('div', { key: w.id, className: `p-2 rounded-xl flex items-center justify-between border-2 ${i===0 ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-100'}` },
+                                h('div', { className: "flex items-center gap-2" },
+                                    h('span', { className: "text-lg" }, i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : ''),
+                                    h('span', { className: `font-black uppercase text-xs truncate w-24 ${i===0 ? 'text-amber-600' : 'text-slate-600'}` }, w.name)
+                                ),
+                                h('span', { className: "text-[9px] font-bold text-slate-400" }, "#", w.rank)
+                            ))
+                        ),
+                        h('button', { onClick: resetAndEliminate, className: "w-full py-2.5 bg-rose-500 text-white font-black text-base rounded-2xl shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2" }, "TIẾP TỤC ✨")
+                    )
+                )
+            );
+        };
+
+        createRoot(document.getElementById('root')).render(h(App));
+    </script>
+</body>
+</html>
